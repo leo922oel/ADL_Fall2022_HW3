@@ -8,11 +8,11 @@ from torch.utils.data.dataset import Dataset
 from transformers import Trainer
 from transformers.file_utils import is_torch_tpu_available
 from transformers.trainer_utils import PredictionOutput
-from transformers.integrations import is_deepspeed_zero3_enabled
+from transformers.deepspeed import is_deepspeed_zero3_enabled
 from transformers.debug_utils import DebugOption
 
-if version.parse(torch.__version__) >= version.parse("1.6"):
-    from torch.cuda.amp import autocast
+# if version.parse(torch.__version__) >= version.parse("1.6"):
+    # from torch.cuda.amp import autocast
 
 if is_torch_tpu_available():
     import torch_xla.core.xla_model as xm
@@ -85,8 +85,8 @@ class SummarizationTrainer(Trainer):
         compute_metrics = self.compute_metrics 
         self.compute_metrics = None
         try:
-            eval_loop = self.prediction_loop if self.args.use_legacy_prediction_loop else self.evaluation_loop
-            output = eval_loop(
+            pred_loop = self.prediction_loop if self.args.use_legacy_prediction_loop else self.evaluation_loop
+            output = pred_loop(
                 test_dataloader, description="Prediction", ignore_keys=ignore_keys, metric_key_prefix=metric_key_prefix
             )
         finally:
@@ -95,7 +95,7 @@ class SummarizationTrainer(Trainer):
         if self.post_process_function is None or self.compute_metrics is None:
             return output
 
-        eval_preds = self.post_process_function(test_examples, output, 'test_eval')
+        eval_preds = self.post_process_function(test_examples, output, 'eval')
         metrics = self.compute_metrics(eval_preds) if 'title' in test_examples.features else None
 
         self._memory_tracker.stop_and_update_metrics(output.metrics)
@@ -131,11 +131,11 @@ class SummarizationTrainer(Trainer):
             generated_tokens = self._pad_tensors_to_max_len(generated_tokens, gen_kwargs["max_length"])
 
         with torch.no_grad():
-            if self.use_amp:
-                with autocast():
-                    outputs = model(**inputs)
-            else:
-                outputs = model(**inputs)
+            # if self.use_amp:
+                # with autocast():
+                    # outputs = model(**inputs)
+            # else:
+            outputs = model(**inputs)
             if has_labels:
                 if self.label_smoother is not None:
                     loss = self.label_smoother(outputs, inputs["labels"]).mean().detach()

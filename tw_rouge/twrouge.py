@@ -3,7 +3,7 @@ import os
 from ckiptagger import WS, data_utils
 from rouge import Rouge
 
-cache_dir = os.environ.get("XDG_CACHE_HOME", os.path.join(os.getenv("HOME"), ".cache"))
+cache_dir = os.environ.get("XDG_CACHE_HOME", os.path.join(os.getenv("HOME"), "adl/hw3/.cache"))
 download_dir = os.path.join(cache_dir, "ckiptagger")
 data_dir = os.path.join(cache_dir, "ckiptagger/data")
 os.makedirs(download_dir, exist_ok=True)

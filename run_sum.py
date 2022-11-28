@@ -46,7 +46,9 @@ from transformers.file_utils import is_offline_mode
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
 
-from trainer_summarization import SummarizationTrainer
+from trainer_sum import SummarizationTrainer
+import torch
+torch.cuda.is_available()
 from tw_rouge import get_rouge
 
 
@@ -164,14 +166,14 @@ class DataTrainingArguments:
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
     max_source_length: Optional[int] = field(
-        default=1024,
+        default=256,
         metadata={
             "help": "The maximum total input sequence length after tokenization. Sequences longer "
             "than this will be truncated, sequences shorter will be padded."
         },
     )
     max_target_length: Optional[int] = field(
-        default=256,
+        default=64,
         metadata={
             "help": "The maximum total sequence length for target text after tokenization. Sequences longer "
             "than this will be truncated, sequences shorter will be padded."
@@ -289,6 +291,7 @@ summarization_name_mapping = {
     "xglue": ("news_body", "news_title"),
     "xsum": ("document", "summary"),
     "wiki_summary": ("article", "highlights"),
+    "multi_news": ("document", "summary"),
 }
 
 
@@ -306,7 +309,7 @@ def main():
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     print(model_args)
-    print(data_args)
+    # print(data_args)
 
     if data_args.source_prefix is None and model_args.model_name_or_path in [
         "t5-small",
@@ -343,14 +346,13 @@ def main():
     )
     log_level = logging.INFO if is_main_process(training_args.local_rank) else logging.WARN
     logger.setLevel(log_level)
-    datasets.utils.logging.set_verbosity(log_level)
-    transformers.utils.logging.set_verbosity(log_level)
-    transformers.utils.logging.enable_default_handler()
-    transformers.utils.logging.enable_explicit_format()
+    # transformers.utils.logging.set_verbosity(log_level)
+    # transformers.utils.logging.enable_default_handler()
+    # transformers.utils.logging.enable_explicit_format()
 
     # Log on each process the small summary:
     logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}, "
         + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
     )
     # Set the verbosity to info of the Transformers logger (on main process only):
@@ -372,7 +374,11 @@ def main():
     # download the dataset.
     if data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        datasets = load_dataset(data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir)
+        datasets = load_dataset(
+            data_args.dataset_name, 
+            data_args.dataset_config_name, 
+            cache_dir=model_args.cache_dir,
+        )
     else:
         data_files = {}
         if data_args.train_file is not None:
@@ -422,7 +428,9 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
     )
 
-    model.resize_token_embeddings(len(tokenizer))
+    embedding_size = model.get_input_embeddings().weight.shape[0]
+    if len(tokenizer) > embedding_size:
+        model.resize_token_embeddings(len(tokenizer))
 
     if model.config.decoder_start_token_id is None:
         raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
@@ -455,6 +463,10 @@ def main():
         summary_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
     else:
         summary_column = data_args.summary_column
+        if summary_column not in column_names:
+            raise ValueError(
+                f"--summary_column value '{data_args.summary_column}' needs to be one of: {','.join(column_names)}"
+            )
 
     # Temporarily set max_target_length for training.
     max_target_length = data_args.max_target_length
@@ -480,7 +492,7 @@ def main():
         # Setup the tokenizer for targets
         with tokenizer.as_target_tokenizer():
             labels = tokenizer(
-                targets, 
+                text_target=targets, 
                 max_length=max_target_length, 
                 padding=padding, 
                 truncation=True,
@@ -501,7 +513,8 @@ def main():
             raise ValueError("--do_train requires a train dataset")
         train_dataset = datasets["train"]
         if data_args.max_train_samples is not None:
-            train_dataset = train_dataset.select(range(data_args.max_train_samples))
+            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
+            train_dataset = train_dataset.select(range(max_train_samples))
         train_dataset = train_dataset.map(
             preprocess_function,
             batched=True,
@@ -516,7 +529,8 @@ def main():
             raise ValueError("--do_eval requires a validation dataset")
         eval_examples = datasets["validation"]
         if data_args.max_eval_samples is not None:
-            eval_examples = eval_examples.select(range(data_args.max_eval_samples))
+            max_eval_samples = min(len(eval_examples), data_args.max_eval_samples)
+            eval_examples = eval_examples.select(range(max_eval_samples))
         eval_dataset = eval_examples.map(
             preprocess_function,
             batched=True,
@@ -531,7 +545,8 @@ def main():
             raise ValueError("--do_predict requires a test dataset")
         predict_examples = datasets["test"]
         if data_args.max_predict_samples is not None:
-            predict_examples = predict_examples.select(range(data_args.max_predict_samples))
+            max_predict_samples = min(len(predict_examples), data_args.max_predict_samples)
+            predict_examples = predict_examples.select(range(max_predict_samples))
         predict_dataset = predict_examples.map(
             preprocess_function,
             batched=True,
@@ -553,16 +568,30 @@ def main():
     metric = get_rouge
 
     def compute_metrics(eval_preds):
-        preds = eval_preds.predictions
-        labels = eval_preds.label_ids
-        preds = [pred + "\n" for pred in preds]
-        labels = [label + "\n" for label in labels]
+        # preds = eval_preds.predictions
+        # labels = eval_preds.label_ids
+        preds, labels = eval_preds
+        if isinstance(preds, tuple):
+            preds = preds[0]
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+        if data_args.ignore_pad_token_for_loss:
+            # Replace -100 in the labels as we can't decode them.
+            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        preds = [pred.strip() for pred in decoded_preds]
+        labels = [label.strip() for label in decoded_labels]
+        preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+        labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
 
         result = metric(preds=preds, refs=labels)
-        result = {f"{k1}_{k2}": v2  for k1, v1 in result.items() for k2, v2 in v1.items()}
+        result = {f"{k1}_{k2}": round(v2*100, 4)  for k1, v1 in result.items() for k2, v2 in v1.items()}
+        # result = {k: round(v2*100, 4) for k, v in result.items() for k2, v2 in v.items()}
+        prediction_lens = [np.count_nonzero(pred != tokenizer.pad_token_id) for pred in preds]
+        result["gen_len"] = np.mean(prediction_lens)
 
         return result
-
+    
     def post_processing_function(examples, pred_outputs, prefix='eval'):
         preds = pred_outputs.predictions
         if isinstance(preds, tuple):
@@ -628,10 +657,16 @@ def main():
 
     # Evaluation
     results = {}
+    max_length = (
+        training_args.generation_max_length
+        if training_args.generation_max_length is not None
+        else data_args.val_max_target_length
+    )
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
         metrics = trainer.evaluate(
+            max_length=max_length,
             metric_key_prefix="eval",
         )
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
@@ -657,6 +692,16 @@ def main():
 
             trainer.log_metrics("predict", metrics)
             trainer.save_metrics("predict", metrics)
+
+        # if trainer.is_world_process_zero():
+            # if training_args.predict_with_generate:
+                # predictions = tokenizer.batch_decode(
+                    # predict_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
+                # )
+                # predictions = [pred.strip() for pred in predictions]
+                # output_prediction_file = os.path.join(training_args.output_dir, "generated_predictions.txt")
+                # with open(output_prediction_file, "w") as writer:
+                    # writer.write("\n".join(predictions))
 
     if training_args.push_to_hub:
         kwargs = {"finetuned_from": model_args.model_name_or_path, "tags": "summarization"}
