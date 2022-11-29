@@ -35,10 +35,15 @@ from filelock import FileLock
 from transformers import (
     AutoConfig,
     AutoModelForSeq2SeqLM,
+    Seq2SeqTrainer,
     AutoTokenizer,
     DataCollatorForSeq2Seq,
     HfArgumentParser,
     Seq2SeqTrainingArguments,
+    MBart50Tokenizer,
+    MBart50TokenizerFast,
+    MBartTokenizer,
+    MBartTokenizerFast,
     EvalPrediction,
     set_seed,
 )
@@ -67,6 +72,7 @@ except (LookupError, OSError):
     with FileLock(".lock") as lock:
         nltk.download("punkt", quiet=True)
 
+MULTILINGUAL_TOKENIZERS = [MBartTokenizer, MBartTokenizerFast, MBart50Tokenizer, MBart50TokenizerFast]
 
 @dataclass
 class ModelArguments:
@@ -398,6 +404,9 @@ def main():
             data_files=data_files, 
             cache_dir=model_args.cache_dir,
         )
+
+        if data_args.test_file is not None:
+            test_examples = datasets["test"]
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
@@ -435,6 +444,26 @@ def main():
     if model.config.decoder_start_token_id is None:
         raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
 
+    if (
+        hasattr(model.config, "max_position_embeddings")
+        and model.config.max_position_embeddings < data_args.max_source_length
+    ):
+        if model_args.resize_position_embeddings is None:
+            logger.warning(
+                "Increasing the model's number of position embedding vectors from"
+                f" {model.config.max_position_embeddings} to {data_args.max_source_length}."
+            )
+            model.resize_position_embeddings(data_args.max_source_length)
+        elif model_args.resize_position_embeddings:
+            model.resize_position_embeddings(data_args.max_source_length)
+        else:
+            raise ValueError(
+                f"`--max_source_length` is set to {data_args.max_source_length}, but the model only has"
+                f" {model.config.max_position_embeddings} position encodings. Consider either reducing"
+                f" `--max_source_length` to {model.config.max_position_embeddings} or to automatically resize the"
+                " model's position encodings by passing `--resize_position_embeddings`."
+            )
+
     prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
 
     # Preprocessing the datasets.
@@ -448,6 +477,21 @@ def main():
     else:
         logger.info("There is nothing to do. Please pass `do_train`, `do_eval` and/or `do_predict`.")
         return
+
+    if isinstance(tokenizer, tuple(MULTILINGUAL_TOKENIZERS)):
+        assert (
+            data_args.lang is not None
+        ), f"{tokenizer.__class__.__name__} is a multilingual tokenizer which requires --lang argument"
+
+        tokenizer.src_lang = data_args.lang
+        tokenizer.tgt_lang = data_args.lang
+
+        # For multilingual translation models like mBART-50 and M2M100 we need to force the target language token
+        # as the first generated token. We ask the user to explicitly provide this as --forced_bos_token argument.
+        forced_bos_token_id = (
+            tokenizer.lang_code_to_id[data_args.forced_bos_token] if data_args.forced_bos_token is not None else None
+        )
+        model.config.forced_bos_token_id = forced_bos_token_id
 
     # Get the column names for input/target.
     dataset_columns = summarization_name_mapping.get(data_args.dataset_name, None)
@@ -479,8 +523,14 @@ def main():
         )
 
     def preprocess_function(examples):
-        inputs = examples[text_column]
-        targets = examples[summary_column] if summary_column in examples else [""] * len(inputs)
+        # inputs = examples[text_column]
+        # targets = examples[summary_column] if summary_column in examples else [""] * len(inputs)
+        inputs, targets = [], []
+        for i in range(len(examples[text_column])):
+            if examples[text_column][i] and examples[summary_column][i]:
+                inputs.append(examples[text_column][i])
+                targets.append(examples[summary_column][i])
+
         inputs = [prefix + inp for inp in inputs]
         model_inputs = tokenizer(
             inputs, 
@@ -592,28 +642,8 @@ def main():
 
         return result
     
-    def post_processing_function(examples, pred_outputs, prefix='eval'):
-        preds = pred_outputs.predictions
-        if isinstance(preds, tuple):
-            preds = preds[0]
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-
-        decoded_preds = [pred.strip() for pred in decoded_preds]
-        labels = examples['title'] if 'title' in examples.features else [""] * len(decoded_preds)
-
-        prediction_file = data_args.output_file if data_args.output_file is not None else os.path.join(training_args.output_dir, f"{prefix}_predictions.json")
-
-        with jsonlines.open(prediction_file, 'w') as writer:
-            for i, title in zip(examples['id'], decoded_preds):
-                writer.write({
-                    "title": title,
-                    "id": i
-                })
-        
-        return EvalPrediction(predictions=decoded_preds, label_ids=labels)
-
     gen_config = {
-        "max_length": data_args.val_max_target_length,
+        "max_length": training_args.generation_max_length if training_args.generation_max_length is not None else data_args.val_max_target_length,
         "num_beams": data_args.num_beams,
         "do_sample": data_args.do_sample,
         "top_k": data_args.top_k,
@@ -632,7 +662,17 @@ def main():
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
         gen_config=gen_config,
-        post_process_function=post_processing_function
+        # post_process_function=post_processing_function
+    )
+
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset if training_args.do_train else None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics if training_args.predict_with_generate else None,
     )
 
     # Training
@@ -657,17 +697,12 @@ def main():
 
     # Evaluation
     results = {}
-    max_length = (
-        training_args.generation_max_length
-        if training_args.generation_max_length is not None
-        else data_args.val_max_target_length
-    )
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
         metrics = trainer.evaluate(
-            max_length=max_length,
             metric_key_prefix="eval",
+            **gen_config,
         )
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
@@ -682,6 +717,7 @@ def main():
             predict_dataset,
             test_examples=predict_examples,
             metric_key_prefix="predict",
+            **gen_config,
         )
         metrics = predict_results.metrics
         if metrics is not None:
@@ -693,15 +729,20 @@ def main():
             trainer.log_metrics("predict", metrics)
             trainer.save_metrics("predict", metrics)
 
-        # if trainer.is_world_process_zero():
-            # if training_args.predict_with_generate:
-                # predictions = tokenizer.batch_decode(
-                    # predict_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
-                # )
-                # predictions = [pred.strip() for pred in predictions]
-                # output_prediction_file = os.path.join(training_args.output_dir, "generated_predictions.txt")
-                # with open(output_prediction_file, "w") as writer:
-                    # writer.write("\n".join(predictions))
+        if trainer.is_world_process_zero():
+            if training_args.predict_with_generate:
+                predictions = tokenizer.batch_decode(
+                    predict_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
+                )
+                predictions = [pred.strip() for pred in predictions]
+                prediction_file = data_args.output_file if data_args.output_file is not None else os.path.join(training_args.output_dir, f"{prefix}_predictions.json")
+
+                with jsonlines.open(prediction_file, 'w') as writer:
+                    for i, title in zip(test_examples['id'], predictions):
+                        writer.write({
+                            "title": title,
+                            "id": i
+                        })
 
     if training_args.push_to_hub:
         kwargs = {"finetuned_from": model_args.model_name_or_path, "tags": "summarization"}
@@ -713,6 +754,10 @@ def main():
             else:
                 kwargs["dataset"] = data_args.dataset_name
 
+    if data_args.lang is not None:
+        kwargs["language"] = data_args.lang
+    
+    if training_args.push_to_hub:
         trainer.push_to_hub(**kwargs)
 
     return results

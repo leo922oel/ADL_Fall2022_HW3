@@ -11,8 +11,8 @@ from transformers.trainer_utils import PredictionOutput
 from transformers.deepspeed import is_deepspeed_zero3_enabled
 from transformers.debug_utils import DebugOption
 
-# if version.parse(torch.__version__) >= version.parse("1.6"):
-    # from torch.cuda.amp import autocast
+if version.parse(torch.__version__) >= version.parse("1.6"):
+    from torch.cuda.amp import autocast
 
 if is_torch_tpu_available():
     import torch_xla.core.xla_model as xm
@@ -85,8 +85,8 @@ class SummarizationTrainer(Trainer):
         compute_metrics = self.compute_metrics 
         self.compute_metrics = None
         try:
-            pred_loop = self.prediction_loop if self.args.use_legacy_prediction_loop else self.evaluation_loop
-            output = pred_loop(
+            eval_loop = self.prediction_loop if self.args.use_legacy_prediction_loop else self.evaluation_loop
+            output = eval_loop(
                 test_dataloader, description="Prediction", ignore_keys=ignore_keys, metric_key_prefix=metric_key_prefix
             )
         finally:
