@@ -715,7 +715,7 @@ def main():
 
         predict_results = trainer.predict(
             predict_dataset,
-            test_examples=predict_examples,
+            # test_examples=predict_examples,
             metric_key_prefix="predict",
             **gen_config,
         )
