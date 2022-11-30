@@ -1,7 +1,7 @@
 pip install gdown
 
-gdown https://drive.google.com/uc?id=19vPnC7ENzWD2a6cTP486PtzHQpVNTQtr
-mv pytorch_model.bin ./mt5-summarization/
+gdown https://drive.google.com/uc?id=1-Ll7aq5a01fOboVnM20vSapFA2_RrkuZ
+mv pytorch_model.bin ./mt5-small/
 
 python tw_rouge/twrouge.py
 

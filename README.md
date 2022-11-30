@@ -20,7 +20,7 @@
 python run_summarization.py \
   --do_train \
   --do_eval \
-  --model_name_or_path google/mt5-small \
+  --model_name_or_path <model_name_or_path> \
   --train_file <train_file> \
   --validation_file <validation_file> \
   --output_dir <output_dir> \
@@ -32,6 +32,7 @@ python run_summarization.py \
   --text_column maintext \
   --summary_column title \
   --adafactor \
+  --fp16 \
   --learning_rate 1e-3 \
   --warmup_ratio 0.1 \
 ```

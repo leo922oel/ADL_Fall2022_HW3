@@ -4,7 +4,7 @@
 export CUDA_VISIBLE_DEVICES=0
 
 python run_sum.py \
-    --model_name_or_path ./mt5-summarization \
+    --model_name_or_path ./mt5-small \
     --do_predict \
     --test_file $1 \
     --output_dir ./mt5-summarization \

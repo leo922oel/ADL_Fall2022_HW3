@@ -51,7 +51,6 @@ from transformers.file_utils import is_offline_mode
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
 
-from trainer_sum import SummarizationTrainer
 import torch
 torch.cuda.is_available()
 from tw_rouge import get_rouge
@@ -523,8 +522,6 @@ def main():
         )
 
     def preprocess_function(examples):
-        # inputs = examples[text_column]
-        # targets = examples[summary_column] if summary_column in examples else [""] * len(inputs)
         inputs, targets = [], []
         for i in range(len(examples[text_column])):
             if examples[text_column][i] and examples[summary_column][i]:
@@ -618,8 +615,6 @@ def main():
     metric = get_rouge
 
     def compute_metrics(eval_preds):
-        # preds = eval_preds.predictions
-        # labels = eval_preds.label_ids
         preds, labels = eval_preds
         if isinstance(preds, tuple):
             preds = preds[0]
@@ -650,20 +645,6 @@ def main():
         "top_p": data_args.top_p,
         "temperature": data_args.temperature,
     }
-
-    # Initialize our Trainer
-    trainer = SummarizationTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
-        eval_examples=eval_examples if training_args.do_eval else None,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics if training_args.predict_with_generate else None,
-        gen_config=gen_config,
-        # post_process_function=post_processing_function
-    )
 
     trainer = Seq2SeqTrainer(
         model=model,
